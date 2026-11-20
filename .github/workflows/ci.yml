@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-pglite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: flags
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - name: Tests against real PostgreSQL (RLS enforced by the server)
+        run: npm test -w server
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/flags
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [test-pglite, test-postgres]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t feature-flags .
+      - name: Smoke test
+        run: |
+          docker run -d --name app -p 3000:3000 feature-flags
+          for i in $(seq 1 30); do curl -fs localhost:3000/api/health && break; sleep 1; done
+          KEY=$(curl -fs -X POST localhost:3000/api/signup -H 'content-type: application/json' -d '{"name":"ci"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['adminKey'])")
+          curl -fs -X POST localhost:3000/api/flags -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"key":"ci-flag","name":"CI","kind":"boolean"}' >/dev/null
+          curl -fs localhost:3000/ | grep -q "Feature Flags Console"
